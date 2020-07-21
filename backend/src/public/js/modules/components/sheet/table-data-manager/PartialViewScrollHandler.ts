@@ -7,6 +7,7 @@
 import { PartialView } from "./ViewFunction";
 import { ViewModel } from "./ViewModel";
 import { bound } from "../../../utils/math";
+import { debounceWithCooldown } from "../../../utils/debounce";
 import { fillerClass, startFillerClass, endFillerClass } from "../../../constants/css-classes";
 import { getScrollParent } from "../../../dom/scroll";
 
@@ -292,10 +293,6 @@ export class PartialViewScrollHandler<T> {
    * An intersection observer to watch `this.endSentinelElement`: if it enters into view
    */
   private endSentinelObserver: IntersectionObserver;
-  /**
-   * A flag used to debounce the scroll event
-   */
-  private ticking: boolean = false;
 
   /**
    * Creates a PartialViewScrollHandler instance.
@@ -387,6 +384,22 @@ export class PartialViewScrollHandler<T> {
     if (axis) {
       this.scrollAxis = axis;
     } else {
+      if (this.partialView.currentView.length >= 2) {
+        // check element placement relationship
+        const firstElement = this.convert(this.partialView.currentView[0]);
+        const secondElement = this.convert(this.partialView.currentView[1]);
+        const { x: firstX, y: firstY } = firstElement.getBoundingClientRect();
+        const { x: secondX, y: secondY } = secondElement.getBoundingClientRect();
+        if (firstX === secondX && firstY !== secondY) {
+          this.scrollAxis = Axis.Vertical;
+          return;
+        } else if (firstX !== secondX && firstY === secondY) {
+        this.scrollAxis = Axis.Horizontal;
+          return;
+        }
+      }
+
+      // check existence of scrollbar
       if (this.scrollTarget.scrollHeight > this.scrollTarget.clientHeight) {
         this.scrollAxis = Axis.Vertical;
       } else if (this.scrollTarget.scrollWidth > this.scrollTarget.clientWidth) {
@@ -405,20 +418,17 @@ export class PartialViewScrollHandler<T> {
    * @listens ScrollEvent
    */
   private initializeScrollEventListener() {
-    this.scrollTarget.addEventListener("scroll", () => {
-      if (!this.ticking) {
-          window.requestAnimationFrame(() => {
-            const startIndex = this.getElementIndexFromScrollAmount();
-            if (startIndex < this.partialView.partialViewStartIndex && this.partialView.partialViewEndIndex < startIndex) {
-              // view out of sync
-              this.setWindow(startIndex);
-            }
-            this.ticking = false;
-          });
-
-          this.ticking = true;
+    const observeTarget = this.scrollTarget === document.documentElement ? window : this.scrollTarget;
+    observeTarget.addEventListener("scroll", debounceWithCooldown((event) => {
+      if (event.target === this.scrollTarget || (document === event.target && document.documentElement === this.scrollTarget)) {
+        // only handle scroll event happening on observed scroll container
+        const startIndex = this.getElementIndexFromScrollAmount();
+        if (startIndex < this.partialView.partialViewStartIndex || this.partialView.partialViewEndIndex < startIndex) {
+          // view out of sync
+          this.setWindow(startIndex);
         }
-    }, { passive: true });
+      }
+    }, 400), { passive: true });
   }
 
   /**
@@ -572,8 +582,8 @@ export class PartialViewScrollHandler<T> {
 
     const newView = viewFunction();
     const scrollPosition = this.scrollPosition;
-    this.syncView(newView);
     this.setFillerLengths();
+    this.syncView(newView);
     this.scrollPosition = scrollPosition;
     if (this.afterViewUpdate) {
       this.afterViewUpdate(newView, this);
@@ -583,7 +593,7 @@ export class PartialViewScrollHandler<T> {
   }
 
   /**
-   * Syncing the DOM with a new view. In effect, the child nodes between `this.startFillerLength` and `this.endFillerElement` in `this.target` will be replaced with current view.
+   * Syncing the DOM with a new view. In effect, the child nodes in `this.target` will be replaced with current view.
    *
    * @param {Array<T>} [newView = this.partialView.currentView] - A new view to update the rendered view.
    */
@@ -612,6 +622,62 @@ export class PartialViewScrollHandler<T> {
       this.target.lastElementChild.remove();
     }
   }
+
+  private shiftView(shiftAmount: number) {
+    // shiftAmount will be rectified to the actual window shift amount
+    if ((shiftAmount = this.partialView.shiftWindow(shiftAmount, true)) === 0) {
+      return;
+    }
+
+    this.deactivateObservers();
+    if (this.beforeViewUpdate) {
+      this.beforeViewUpdate(this.partialView.currentView, this);
+    }
+
+    const view = this.partialView.view(this.partialView.lastSource);
+    const isShiftTowardsEnd = shiftAmount > 0;
+    const numViewElement = view.length;
+
+    // the number of elements in current view to be removed, upper bounded by the number of existing elements
+    const numElementToRemove = Math.min(this.partialView.windowSize, Math.abs(shiftAmount));
+    if (isShiftTowardsEnd) {
+      for (let i = 0; i < numElementToRemove; i++) {
+        if (!this.target.firstElementChild) {
+          console.log(this.target.firstElementChild);
+        }
+        this.target.firstElementChild.remove();
+      }
+      this.setFillerLengths();
+      // use 0 as lower bound since there can be at most 0 overlapping elements (windowSize distinct elements)
+      for (let viewElementIndex = Math.max(0, numViewElement - shiftAmount); viewElementIndex < numViewElement; viewElementIndex++) {
+        const viewElement = this.convert(view[viewElementIndex]);
+        this.target.appendChild(viewElement);
+      }
+    } else {
+      shiftAmount = -shiftAmount;
+      for (let i = 0; i < numElementToRemove; i++) {
+        this.target.lastElementChild.remove();
+      }
+      const referenceNode = this.target.firstElementChild;
+      // at most there can be 0 overlapping elements (windowSize distinct elements)
+      const numViewElementToAdd = Math.min(numViewElement, shiftAmount);
+      for (let viewElementIndex = 0; viewElementIndex < numViewElementToAdd; viewElementIndex++) {
+        const viewElement = this.convert(view[viewElementIndex]);
+        this.target.insertBefore(viewElement, referenceNode);
+      }
+      this.setFillerLengths();
+    }
+
+    if (this.target.children.length !== this.partialView.windowSize) {
+      console.log(this.target.children.length);
+    }
+
+    if (this.afterViewUpdate) {
+      this.afterViewUpdate(this.partialView.currentView, this);
+    }
+    this.activateObservers();
+  }
+
 
   /**
    * Calculate element index from a scroll amount.
@@ -650,8 +716,9 @@ export class PartialViewScrollHandler<T> {
   private fillerReachedHandler(entries: Array<IntersectionObserverEntry>) {
     entries.forEach(entry => {
       if (entry.isIntersecting && entry.intersectionRect.height > 0) {
-        const startIndex = this.getElementIndexFromScrollAmount();
-        this.setWindow(startIndex);
+        const newStartIndex = this.getElementIndexFromScrollAmount();
+        const shiftAmount = newStartIndex - this.partialView.partialViewStartIndex;
+        this.shiftView(shiftAmount);
       }
     });
   }
@@ -670,8 +737,8 @@ export class PartialViewScrollHandler<T> {
       const desiredDirection: Direction = this.startSentinelElement === entry.target ? Direction.Up : Direction.Down;
       if (entry.isIntersecting && entry.intersectionRect.height > 0 && scrollDirection === desiredDirection) {
         // the last element of the first data section is appearing into view
-        const startIndex: number = this.partialView.numElementNotRenderedBefore + (scrollDirection === Direction.Up ? -shiftAmount : shiftAmount);
-        this.setWindow(startIndex);
+        const shift = scrollDirection === Direction.Up ? -shiftAmount : shiftAmount;
+        this.shiftView(shift);
       }
     });
   }

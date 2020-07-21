@@ -1,7 +1,7 @@
 import { BasicView } from "./table-data-manager/View";
 import { SortingFunctionWithPriority } from "./table-data-manager/ViewFunction";
 import { ViewModel } from "./table-data-manager/ViewModel";
-import { getTableRow, getRowIndexInSection } from "../../dom/sheet";
+import { getRowIndexInSection } from "../../dom/sheet";
 
 
 function getOffsetFromPageTop(element: HTMLElement): number {
@@ -15,6 +15,15 @@ function getOffsetFromPageTop(element: HTMLElement): number {
 
 
 export class TabularView extends BasicView {
+  /**
+   * @returns {Array<ViewModel>} The full view before partial rendering (before passing into PartialView.
+   */
+  get fullView(): Array<ViewModel> {
+    // updates view if necessary
+    this.view;
+    return this.partialView.lastSource;
+  }
+
   get startFillerFromPageTop(): number {
     return getOffsetFromPageTop(this.scrollHandler.startFillerElement);
   }
@@ -34,6 +43,15 @@ export class TabularView extends BasicView {
 
   isElementInRenderingView(element: HTMLTableRowElement): boolean {
     return element.parentElement === this.sourceViewModel.element_;
+  }
+
+  /**
+   * @param {HTMLTableRowElement} element - The element to find.
+   * @returns {boolean} whether the element can be reached by scrolling.
+   */
+  isElementInPotentialView(element: HTMLTableRowElement): boolean {
+    const child: ViewModel = this.sourceViewModel.getChildByElement__(element);
+    return child && this.fullView.includes(child);
   }
 
   putElementInRenderingView(element: HTMLTableRowElement): boolean {

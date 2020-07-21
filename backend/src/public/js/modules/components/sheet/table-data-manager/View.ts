@@ -1,8 +1,10 @@
-import { ViewModel } from "./ViewModel";
-import { FilterFunction, FilteredView, PartialView, SortedView, SortingFunction, ViewFunctionChain } from "./ViewFunction";
 import { MutationReporter } from "./MutationReporter";
 import { PartialViewScrollHandler, Axis } from "./PartialViewScrollHandler";
+import { TaskQueue } from "./TaskQueue";
+import { ViewModel } from "./ViewModel";
+import { FilterFunction, FilteredView, PartialView, SortedView, SortingFunction, ViewFunctionChain } from "./ViewFunction";
 import { getViewportHeight, getViewportWidth } from "../../../utils/length";
+import { debounceWithCooldown } from "../../../utils/debounce";
 
 
 /**
@@ -45,6 +47,11 @@ export class BasicView {
   protected scrollHandler: PartialViewScrollHandler<ViewModel>;
   /** provides an aggregate transformation from source view to final target view */
   protected viewFunctionChain: ViewFunctionChain<ViewModel>;
+
+  /** tasks executed before view update */
+  beforeViewUpdateTaskQueue: TaskQueue = new TaskQueue();
+  /** tasks executed after view update */
+  afterViewUpdateTaskQueue: TaskQueue = new TaskQueue();
 
   /**
    * @returns {number} The maximum number of elements to be rendered.
@@ -100,6 +107,7 @@ export class BasicView {
       );
       this.parseSource(source);
       this.initializeViewFunction();
+      this.initializeTaskQueue();
       this.initializeScrollHandler();
       // updates to a window size appropriate for window size
       this.adjustWindowSizeUpperBound();
@@ -140,21 +148,11 @@ export class BasicView {
     }
   }
 
-  /** A timeout used to debounce the timeout event */
-  private resizeTimeout: number;
   /**
    * Set up a handler for the {@link https://developer.mozilla.org/en-US/docs/Web/API/Window/resize_event resize} event. This handler will adjust the maximum window size so that a smaller screen has a smaller window size while a larger screen has a larger window size.
    */
   protected initializeResizeHandler() {
-    window.addEventListener("resize", () => {
-      if (this.resizeTimeout) {
-        window.clearTimeout(this.resizeTimeout);
-      }
-      this.resizeTimeout = window.setTimeout(() => {
-        this.resizeTimeout = null;
-        this.adjustWindowSizeUpperBound();
-      }, 1000);
-    });
+    window.addEventListener("resize", debounceWithCooldown(() => this.adjustWindowSizeUpperBound(), 1000));
   }
 
   /**
@@ -164,7 +162,7 @@ export class BasicView {
     const elementLength = this.scrollHandler.elementLength;
     const viewportLength = this.scrollHandler.scrollAxis === Axis.Horizontal ? getViewportWidth() : getViewportHeight();
     // four times the current viewport height
-    let numElements = Math.max(0, Math.floor(viewportLength / elementLength)) * 4;
+    let numElements = Math.max(1, Math.floor(viewportLength / elementLength)) * 4;
     // round to next number divisible by 10
     numElements = Math.ceil(numElements / 10) * 10;
     if (numElements !== this.windowSizeUpperBound) {
@@ -178,11 +176,22 @@ export class BasicView {
   protected initializeViewFunction() {
     this.filteredView = new FilteredView<ViewModel>();
     // initially only render one element
-    this.partialView = new PartialView<ViewModel>(this.source, 0, 0, 1);
+    this.partialView = new PartialView<ViewModel>(this.source, 0, 1, 2);
     this.sortedView = new SortedView<ViewModel>();
     this.viewFunctionChain = new ViewFunctionChain<ViewModel>([this.filteredView, this.sortedView, this.partialView]);
     // set up the first target view
     this.view;
+  }
+
+  protected initializeTaskQueue() {
+    this.beforeViewUpdateTaskQueue.tasks.push({
+      work: () => this.unmonitor(),
+      isRecurring: true
+    });
+    this.afterViewUpdateTaskQueue.tasks.push({
+      work: () => this.monitor(),
+      isRecurring: true
+    });
   }
 
   /**
@@ -192,8 +201,8 @@ export class BasicView {
     this.scrollHandler = new PartialViewScrollHandler<ViewModel>({
       partialView: this.partialView,
       target: this.sourceViewModel.element_,
-      beforeViewUpdate: () => this.unmonitor(),
-      afterViewUpdate: () => this.monitor(),
+      beforeViewUpdate: () => this.beforeViewUpdateTaskQueue.work(),
+      afterViewUpdate: () => this.afterViewUpdateTaskQueue.work(),
     });
   }
 
@@ -246,8 +255,8 @@ export class BasicView {
     const addedNodeToChildIndex: Map<Node, number> = new Map();
     for (const addedNode of mutation.addedNodes) {
       let childIndex = 0;
-      let child;
-      while ((child = (addedNode as HTMLElement).previousElementSibling)) {
+      let child = addedNode;
+      while ((child = (child as HTMLElement).previousElementSibling)) {
         childIndex++;
         if (addedNodeToChildIndex.has(child)) {
           childIndex += addedNodeToChildIndex.get(child);
@@ -264,9 +273,19 @@ export class BasicView {
 
   /**
    * Renders current target view to the page.
+   *
+   * 1. It regenerates the target view to ensure updates (like adding a filter function) are considered
+   * 2. It tries to maximize the window in case the window is decreased due to there wasn't sufficient number of elements previously
+   * 3. It updates the view (target view is regenerated because the window might have changed.
    */
   protected refreshView() {
-    this.scrollHandler.setView(() => this.view);
+    let view = this.view;
+    // tries to maximize the window
+    if (this.partialView.setWindow(this.partialView.partialViewStartIndex)) {
+      // window changed
+      view = this.partialView.view(this.partialView.lastSource);
+    }
+    this.scrollHandler.setView(() => view);
   }
 
   /**
