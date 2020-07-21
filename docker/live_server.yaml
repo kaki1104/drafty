@@ -1,6 +1,6 @@
 version: '3.3'
 services:
-    run:
+    mariadb:
         container_name: mariadb
         volumes:
             - '/vol/docker/mysql/datadir:/var/lib/mysql'
@@ -9,7 +9,7 @@ services:
         environment:
             - MYSQL_ROOT_PASSWORD=<put_something_here>
             - MYSQL_DATABASE=test
-        image: run
+        image: library/mariadb
     phpmyadmin:
         container_name: myadmin
         links:
