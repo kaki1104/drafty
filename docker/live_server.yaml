@@ -13,7 +13,7 @@ services:
     phpmyadmin:
         container_name: myadmin
         links:
-            - 'mariadb:db'
+            - 'mariadb'
         ports:
             - '8888:80'
         image: phpmyadmin/phpmyadmin
